@@ -381,6 +381,9 @@ void pci_default_write_config(PCIDevice *d,
                               uint32_t address, uint32_t val, int len);
 void pci_device_save(PCIDevice *s, QEMUFile *f);
 int pci_device_load(PCIDevice *s, QEMUFile *f);
+
+void pci_update_mappings(PCIDevice *d);
+
 MemoryRegion *pci_address_space(PCIDevice *dev);
 MemoryRegion *pci_address_space_io(PCIDevice *dev);
 

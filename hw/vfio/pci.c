@@ -28,6 +28,7 @@
 #include "hw/pci/pci_bridge.h"
 #include "hw/qdev-properties.h"
 #include "migration/vmstate.h"
+#include "migration/qemu-file-types.h"
 #include "qemu/error-report.h"
 #include "qemu/main-loop.h"
 #include "qemu/module.h"
@@ -984,6 +985,69 @@ static void vfio_pci_size_rom(VFIOPCIDevice *vdev)
                      PCI_BASE_ADDRESS_SPACE_MEMORY, &vdev->pdev.rom);
 
     vdev->rom_read_failed = false;
+}
+
+static void vfio_pci_save_rom(VFIOPCIDevice *vdev, QEMUFile *f)
+{
+    uint32_t size;
+
+    if (vdev->pdev.romfile || !vdev->pdev.rom_bar) {
+        /* PCI handles romfile */
+        return;
+    }
+
+    size = (uint32_t)memory_region_size(&vdev->pdev.rom);
+    qemu_put_be32(f, size);
+    if (!size) {
+        return;
+    }
+
+    qemu_put_be32(f, vdev->rom_size);
+    qemu_put_be64(f, vdev->rom_offset);
+
+    qemu_put_byte(f, vdev->rom_read_failed ? 1 : 0);
+    if (vdev->rom_read_failed) {
+        return;
+    }
+
+    if (vdev->rom) {
+        qemu_put_buffer(f, vdev->rom, vdev->rom_size);
+    }
+}
+
+static void vfio_pci_reload_rom(VFIOPCIDevice *vdev, QEMUFile *f)
+{
+    uint32_t size;
+    char *name;
+
+    if (vdev->pdev.romfile || !vdev->pdev.rom_bar) {
+        /* PCI handles romfile */
+        return;
+    }
+
+    size = qemu_get_be32(f);
+    if (!size) {
+        return;
+    }
+
+    name = g_strdup_printf("vfio[%s].rom", vdev->vbasedev.name);
+    memory_region_init_io(&vdev->pdev.rom, OBJECT(vdev),
+                          &vfio_rom_ops, vdev, name, size);
+    g_free(name);
+
+    pci_register_bar(&vdev->pdev, PCI_ROM_SLOT,
+                     PCI_BASE_ADDRESS_SPACE_MEMORY, &vdev->pdev.rom);
+
+    vdev->rom_size = qemu_get_be32(f);
+    vdev->rom_offset = (off_t)qemu_get_be64(f);
+
+    vdev->rom_read_failed = qemu_get_byte(f) ? true : false;
+    if (vdev->rom_read_failed) {
+        return;
+    }
+
+    vdev->rom = g_malloc(vdev->rom_size);
+    qemu_get_buffer(f, vdev->rom, vdev->rom_size);
 }
 
 void vfio_vga_write(void *opaque, hwaddr addr,
@@ -3267,6 +3331,97 @@ static Property vfio_pci_dev_properties[] = {
     DEFINE_PROP_END_OF_LIST(),
 };
 
+static void vfio_pci_keepalive_save_config(PCIDevice *pdev, QEMUFile *f)
+{
+    qemu_put_buffer(f, pdev->config, pci_config_size(pdev));
+}
+
+static void vfio_pci_keepalive_load_config(PCIDevice *pdev, QEMUFile *f)
+{
+    qemu_get_buffer(f, pdev->config, pci_config_size(pdev));
+
+    pci_update_mappings(pdev);
+    memory_region_set_enabled(&pdev->bus_master_enable_region,
+                              pci_get_word(pdev->config + PCI_COMMAND)
+                              & PCI_COMMAND_MASTER);
+}
+
+static int vfio_pci_device_put(QEMUFile *f, void *opaque, size_t size,
+                           const VMStateField *field, QJSON *vmdesc)
+{
+    VFIOPCIDevice *vdev = VFIO_PCI(opaque);
+    PCIDevice *pdev = &vdev->pdev;
+
+    if (!vfio_device_is_keepalive(&vdev->vbasedev)) {
+        return -ENOTSUP;
+    }
+
+    vfio_pci_save_rom(vdev, f);
+    vfio_pci_keepalive_save_config(pdev, f);
+
+    qemu_put_be32(f, vdev->interrupt);
+    if (vdev->interrupt == VFIO_INT_MSIX) {
+        msix_save(pdev, f);
+    }
+
+    return 0;
+}
+
+static int vfio_pci_device_get(QEMUFile *f, void *opaque, size_t size,
+                             const VMStateField *field)
+{
+    VFIOPCIDevice *vdev = VFIO_PCI(opaque);
+    PCIDevice *pdev = &vdev->pdev;
+    uint32_t interrupt_type;
+
+    if (!vfio_device_is_keepalive(&vdev->vbasedev)) {
+        return -ENOTSUP;
+    }
+
+    vfio_pci_reload_rom(vdev, f);
+    vfio_pci_keepalive_load_config(pdev, f);
+
+    interrupt_type = qemu_get_be32(f);
+    if (interrupt_type == VFIO_INT_MSI) {
+        if (msi_enabled(pdev)) {
+            vfio_msi_enable(vdev);
+        }
+    } else if (interrupt_type == VFIO_INT_MSIX) {
+        msix_unuse_all_vectors(pdev);
+        if (msix_enabled(pdev)) {
+            vfio_msix_enable(vdev);
+        }
+        msix_load(pdev, f);
+    }
+
+    return 0;
+}
+
+const VMStateInfo  vfio_pci_vmstate_info = {
+    .name = "vfio",
+    .get = vfio_pci_device_get,
+    .put = vfio_pci_device_put,
+};
+
+#define VMSTATE_VFIO_DEVICE                   \
+    {                                         \
+        .name = "vfio-pci-state",             \
+        .info = &vfio_pci_vmstate_info,       \
+        .flags = VMS_SINGLE,                  \
+    }
+
+#define VFIO_PCI_VM_VERSION	1
+
+static const VMStateDescription vfio_pci_vmstate = {
+    .name = "vfio-pci",
+    .minimum_version_id = VFIO_PCI_VM_VERSION,
+    .version_id = VFIO_PCI_VM_VERSION,
+    .fields = (VMStateField[]) {
+        VMSTATE_VFIO_DEVICE,
+        VMSTATE_END_OF_LIST()
+    },
+};
+
 static void vfio_pci_dev_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
@@ -3274,6 +3429,7 @@ static void vfio_pci_dev_class_init(ObjectClass *klass, void *data)
 
     dc->reset = vfio_pci_reset;
     device_class_set_props(dc, vfio_pci_dev_properties);
+    dc->vmsd = &vfio_pci_vmstate;
     dc->desc = "VFIO-based PCI device assignment";
     set_bit(DEVICE_CATEGORY_MISC, dc->categories);
     pdc->realize = vfio_realize;
