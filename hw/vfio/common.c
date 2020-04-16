@@ -473,7 +473,8 @@ static int vfio_dma_unmap(VFIOContainer *container,
 }
 
 static int vfio_dma_map(VFIOContainer *container, hwaddr iova,
-                        ram_addr_t size, void *vaddr, bool readonly)
+                        ram_addr_t size, void *vaddr,
+                        bool readonly, bool keepalive)
 {
     struct vfio_iommu_type1_dma_map map = {
         .argsz = sizeof(map),
@@ -485,6 +486,9 @@ static int vfio_dma_map(VFIOContainer *container, hwaddr iova,
 
     if (!readonly) {
         map.flags |= VFIO_DMA_MAP_FLAG_WRITE;
+    }
+    if (keepalive) {
+        map.flags |= VFIO_DMA_MAP_FLAG_KEEPALIVE;
     }
 
     /*
@@ -555,7 +559,8 @@ static bool vfio_listener_skipped_section(MemoryRegionSection *section)
 
 /* Called with rcu_read_lock held.  */
 static bool vfio_get_xlat_addr(IOMMUTLBEntry *iotlb, void **vaddr,
-                               ram_addr_t *ram_addr, bool *read_only)
+                               ram_addr_t *ram_addr, bool *read_only,
+                               bool *keepalive)
 {
     MemoryRegion *mr;
     hwaddr xlat;
@@ -598,6 +603,10 @@ static bool vfio_get_xlat_addr(IOMMUTLBEntry *iotlb, void **vaddr,
         *read_only = !writable || mr->readonly;
     }
 
+    if (keepalive) {
+        *keepalive = qemu_ram_is_shared(mr->ram_block);
+    }
+
     return true;
 }
 
@@ -621,9 +630,9 @@ static void vfio_iommu_map_notify(IOMMUNotifier *n, IOMMUTLBEntry *iotlb)
     rcu_read_lock();
 
     if ((iotlb->perm & IOMMU_RW) != IOMMU_NONE) {
-        bool read_only;
+        bool read_only, keepalive;
 
-        if (!vfio_get_xlat_addr(iotlb, &vaddr, NULL, &read_only)) {
+        if (!vfio_get_xlat_addr(iotlb, &vaddr, NULL, &read_only, &keepalive)) {
             goto out;
         }
         /*
@@ -635,7 +644,7 @@ static void vfio_iommu_map_notify(IOMMUNotifier *n, IOMMUTLBEntry *iotlb)
          */
         ret = vfio_dma_map(container, iova,
                            iotlb->addr_mask + 1, vaddr,
-                           read_only);
+                           read_only, keepalive);
         if (ret) {
             error_report("vfio_dma_map(%p, 0x%"HWADDR_PRIx", "
                          "0x%"HWADDR_PRIx", %p) = %d (%m)",
@@ -665,6 +674,7 @@ static void vfio_listener_region_add(MemoryListener *listener,
     int ret;
     VFIOHostDMAWindow *hostwin;
     bool hostwin_found;
+    bool keepalive;
     Error *err = NULL;
 
     if (vfio_listener_skipped_section(section)) {
@@ -836,8 +846,15 @@ static void vfio_listener_region_add(MemoryListener *listener,
         }
     }
 
+    if (memory_region_is_ram(section->mr) &&
+        qemu_ram_is_shared(section->mr->ram_block)) {
+        keepalive = true;
+    } else {
+        keepalive = false;
+    }
+
     ret = vfio_dma_map(container, iova, int128_get64(llsize),
-                       vaddr, section->readonly);
+                       vaddr, section->readonly, keepalive);
     if (ret) {
         error_setg(&err, "vfio_dma_map(%p, 0x%"HWADDR_PRIx", "
                    "0x%"HWADDR_PRIx", %p) = %d (%m)",
@@ -1063,7 +1080,7 @@ static void vfio_iommu_map_dirty_notify(IOMMUNotifier *n, IOMMUTLBEntry *iotlb)
     }
 
     rcu_read_lock();
-    if (vfio_get_xlat_addr(iotlb, NULL, &translated_addr, NULL)) {
+    if (vfio_get_xlat_addr(iotlb, NULL, &translated_addr, NULL, NULL)) {
         int ret;
 
         ret = vfio_get_dirty_bitmap(container, iova, iotlb->addr_mask + 1,
