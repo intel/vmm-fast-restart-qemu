@@ -16,6 +16,17 @@
 
 #include "qemu/error-report.h"
 
+typedef struct KeepaliveHandler {
+    int (*check_keepalive_support)(void *opaque);
+    int (*set_keepalive)(void *opaque, bool on, void *data);
+} KeepaliveHandler;
+
+int register_keepalive_handler(const char *idstr,
+                               const KeepaliveHandler *ops,
+                               void *opaque);
+void unregister_keepalive_handler(const char *idstr,
+                                  const KeepaliveHandler *ops);
+
 void qemu_set_keepalive(bool on, void *data, Error **errp);
 void qemu_keepalive_init(void);
 

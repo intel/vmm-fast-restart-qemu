@@ -2356,11 +2356,103 @@ ram_addr_t qemu_ram_addr_from_host(void *ptr)
     return block->offset + offset;
 }
 
+typedef struct KeepaliveEntry {
+    QTAILQ_ENTRY(KeepaliveEntry) entry;
+    char idstr[32];
+    const KeepaliveHandler *ops;
+    void *opaque;
+} KeepaliveEntry;
+
+static QTAILQ_HEAD(, KeepaliveEntry) keepalive_handlers =
+    QTAILQ_HEAD_INITIALIZER(keepalive_handlers);
+
+int register_keepalive_handler(const char *idstr,
+                               const KeepaliveHandler *ops,
+                               void *opaque)
+{
+    KeepaliveEntry *ke;
+
+    ke = g_new0(KeepaliveEntry, 1);
+    pstrcat(ke->idstr, sizeof(ke->idstr), idstr);
+    ke->ops = ops;
+    ke->opaque = opaque;
+    QTAILQ_INSERT_TAIL(&keepalive_handlers, ke, entry);
+    return 0;
+}
+
+void unregister_keepalive_handler(const char *idstr,
+                                  const KeepaliveHandler *ops)
+{
+    KeepaliveEntry *ke;
+
+    QTAILQ_FOREACH(ke, &keepalive_handlers, entry) {
+        if (strcmp(ke->idstr, idstr) == 0 && ke->ops == ops) {
+            QTAILQ_REMOVE(&keepalive_handlers, ke, entry);
+            g_free(ke);
+            return;
+        }
+    }
+}
+
+static int keepalive_handlers_check_support(void)
+{
+    KeepaliveEntry *ke;
+
+    QTAILQ_FOREACH(ke, &keepalive_handlers, entry) {
+        if (!ke->ops->check_keepalive_support) {
+            continue;
+        }
+        if (ke->ops->check_keepalive_support(ke->opaque)) {
+            error_report("%s doesn't support keepalive", ke->idstr);
+            return -ENOTSUP;
+        }
+    }
+    return 0;
+}
+
+static int keepalive_handlers_set_keepalive(bool on, void *data)
+{
+    KeepaliveEntry *ke, *e;
+    int ret;
+
+    QTAILQ_FOREACH(ke, &keepalive_handlers, entry) {
+        if (!ke->ops->set_keepalive) {
+            continue;
+        }
+        ret = ke->ops->set_keepalive(ke->opaque, on, data);
+        if (ret) {
+            error_report("%s failed to set keepalive", ke->idstr);
+            goto out_undo_keepalive;
+        }
+    }
+    return 0;
+out_undo_keepalive:
+    QTAILQ_FOREACH(e, &keepalive_handlers, entry) {
+        if (e == ke) {
+            break;
+        }
+        e->ops->set_keepalive(e->opaque, !on, data);
+    }
+    return ret;
+}
+
 static bool keepalive_enabled;
 
 void qemu_set_keepalive(bool on, void *data, Error **errp)
 {
     if (keepalive_enabled == on) {
+        return;
+    }
+
+    if (!keepalive_enabled && on) {
+        if (keepalive_handlers_check_support()) {
+            error_setg(errp, "This VM doesn't support keepalive state");
+            return;
+        }
+    }
+
+    if (keepalive_handlers_set_keepalive(on, data)) {
+        error_setg(errp, "failed to turn %s keepalive state", on ? "on" : "off");
         return;
     }
 
