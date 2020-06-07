@@ -2437,6 +2437,61 @@ out_undo_keepalive:
     return ret;
 }
 
+static int memory_region_check_keepalive(MemoryRegion *mr)
+{
+#if defined(__linux__)
+    g_autofree char *subsystem_path = NULL;
+    g_autofree char *subsystem = NULL;
+    struct stat st;
+
+    if (!memory_region_is_ram(mr) || !qemu_ram_is_shared(mr->ram_block)) {
+        return -ENOTSUP;
+    }
+
+    /* make sure it is a dax device */
+
+    if (fstat(mr->ram_block->fd, &st) < 0) {
+        return -errno;
+    }
+
+    if (!S_ISCHR(st.st_mode)) {
+        return -ENOTSUP;
+    }
+
+    subsystem_path = g_strdup_printf("/sys/dev/char/%d:%d/subsystem",
+                                     major(st.st_rdev), minor(st.st_rdev));
+    subsystem = g_file_read_link(subsystem_path, NULL);
+
+    if (subsystem && g_str_has_suffix(subsystem, "/dax")) {
+        return 0;
+    }
+#endif
+    return -ENOTSUP;
+}
+
+static int machine_ram_check_keepalive(void *opaque)
+{
+    MachineState *machine = opaque;
+    MemoryRegion *mr = machine->ram;
+    MemoryRegion *child;
+
+    if (mr->terminates) {
+        return memory_region_check_keepalive(mr);
+    }
+
+    QTAILQ_FOREACH(child, &mr->subregions, subregions_link) {
+        int ret = memory_region_check_keepalive(child);
+        if (ret) {
+            return ret;
+        }
+    }
+    return 0;
+}
+
+static KeepaliveHandler machine_ram_keepalive_handler = {
+    .check_keepalive_support = machine_ram_check_keepalive,
+};
+
 static bool keepalive_enabled;
 
 static int get_keepalive_enabled(QEMUFile *f, void *pv, size_t size,
@@ -2511,6 +2566,8 @@ void qemu_keepalive_init(void)
 {
     qemu_add_opts(&qemu_keepalive_opts);
     vmstate_register(NULL, 0, &vmstate_keepalive_enabled, NULL);
+    register_keepalive_handler("machine-ram",
+                               &machine_ram_keepalive_handler, current_machine);
 }
 
 
