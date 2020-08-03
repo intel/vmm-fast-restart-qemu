@@ -173,6 +173,7 @@ struct VFIOPCIDevice {
     bool enable_ramfb;
     VFIODisplay *dpy;
     Notifier irqchip_change_notifier;
+    char *keepalive_token;
 };
 
 /* Use uin32_t for vendor & device so PCI_ANY_ID expands and cannot match hw */
