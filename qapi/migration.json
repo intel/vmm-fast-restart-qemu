@@ -1843,3 +1843,13 @@
 # Since: 5.2
 ##
 { 'command': 'query-dirty-rate', 'returns': 'DirtyRateInfo' }
+
+##
+# @set-keepalive:
+#
+# set or clear keepalive flag for VMM Fast Restart
+#
+# Since: 5.2
+##
+{ 'command': 'set-keepalive', 'data': {'action': 'str',
+                                   'token': 'str'} }

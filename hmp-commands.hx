@@ -373,6 +373,25 @@ SRST
 ERST
 
     {
+        .name       = "set-keepalive",
+        .args_type  = "keepalive:O",
+        .params     = "on,token=uuid|off",
+        .help       = "turn on or off keepalive state",
+        .cmd        = hmp_set_keepalive,
+    },
+
+SRST
+``set-keepalive on,token=uuid|off``
+  Turn on or off keepalive state.
+
+  When keepalive is on, all passthrough devices and related components
+  will be put into keepalive state, in which hardware states must not be
+  changed, while software instances can be destroyed and later re-created.
+  After re-creation, the software instances will be reattached with the
+  hardware state.
+ERST
+
+    {
         .name       = "singlestep",
         .args_type  = "option:s?",
         .params     = "[on|off]",

@@ -53,6 +53,7 @@
 #include "qemu/cutils.h"
 #include "qemu/error-report.h"
 #include "exec/ramlist.h"
+#include "exec/keepalive.h"
 #include "hw/intc/intc.h"
 #include "hw/rdma/rdma.h"
 #include "migration/snapshot.h"
@@ -1155,6 +1156,41 @@ void hmp_delvm(Monitor *mon, const QDict *qdict)
                       "deleting snapshot on device '%s': ",
                       bdrv_get_device_name(bs));
     }
+    hmp_handle_error(mon, err);
+}
+
+void hmp_set_keepalive(Monitor *mon, const QDict *qdict)
+{
+    const char *str_uuid;
+    const char *action;
+    Error *err = NULL;
+    QemuOpts *opts;
+
+    opts = qemu_opts_from_qdict(qemu_find_opts("keepalive"), qdict, &err);
+    if (err) {
+        goto out;
+    }
+
+    action = qemu_opt_get(opts, "action");
+    if (!action) {
+        error_report("on or off must be specified");
+        return;
+    }
+
+    if (strcmp(action, "on") == 0) {
+        str_uuid = qemu_opt_get(opts, "token");
+        if (!str_uuid) {
+            error_report("must be specified for keepalive on");
+            return;
+        }
+    } else {
+        str_uuid = NULL;
+    }
+
+    qmp_set_keepalive(action, str_uuid, &err);
+    qemu_opts_del(opts);
+
+out:
     hmp_handle_error(mon, err);
 }
 

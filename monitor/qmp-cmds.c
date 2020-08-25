@@ -29,6 +29,7 @@
 #include "sysemu/arch_init.h"
 #include "sysemu/blockdev.h"
 #include "sysemu/block-backend.h"
+#include "exec/keepalive.h"
 #include "qapi/error.h"
 #include "qapi/qapi-commands-acpi.h"
 #include "qapi/qapi-commands-block.h"
@@ -36,6 +37,7 @@
 #include "qapi/qapi-commands-machine.h"
 #include "qapi/qapi-commands-misc.h"
 #include "qapi/qapi-commands-ui.h"
+#include "qapi/qapi-commands-migration.h"
 #include "qapi/qmp/qerror.h"
 #include "hw/mem/memory-device.h"
 #include "hw/acpi/acpi_dev_interface.h"
@@ -400,4 +402,21 @@ MemoryInfo *qmp_query_memory_size_summary(Error **errp)
         mem_info->plugged_memory != (uint64_t)-1;
 
     return mem_info;
+}
+
+void qmp_set_keepalive(const char *action, const char *str_uuid, Error **errp)
+{
+    QemuUUID uuid;
+
+    if (strcmp(action, "on") == 0) {
+        if (!str_uuid || qemu_uuid_parse(str_uuid, &uuid) < 0) {
+            error_setg(errp, "failed to parse UUID string: wrong format");
+            return;
+        }
+        qemu_set_keepalive(true, &uuid, errp);
+    } else if (strcmp(action, "off") == 0) {
+        qemu_set_keepalive(false, NULL, errp);
+    } else {
+        error_setg(errp, "incorrect parameter: %s", action);
+    }
 }
