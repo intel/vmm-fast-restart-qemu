@@ -232,4 +232,9 @@ int vfio_spapr_remove_window(VFIOContainer *container,
 int vfio_migration_probe(VFIODevice *vbasedev, Error **errp);
 void vfio_migration_finalize(VFIODevice *vbasedev);
 
+int vfio_migration_set_keepalive(VFIODevice *vbasedev, bool set);
+
+bool vfio_device_is_keepalive(VFIODevice *vdev);
+int vfio_set_keepalive(void *opaque, bool on, void *data);
+
 #endif /* HW_VFIO_VFIO_COMMON_H */

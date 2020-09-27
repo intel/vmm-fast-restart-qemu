@@ -34,6 +34,7 @@
 #include "qemu/error-report.h"
 #include "qemu/main-loop.h"
 #include "qemu/range.h"
+#include "qemu/uuid.h"
 #include "sysemu/kvm.h"
 #include "sysemu/reset.h"
 #include "trace.h"
@@ -2251,4 +2252,108 @@ int vfio_eeh_as_op(AddressSpace *as, uint32_t op)
         return -ENODEV;
     }
     return vfio_eeh_container_op(container, op);
+}
+
+bool vfio_device_is_keepalive(VFIODevice *vbasedev)
+{
+    return vbasedev->flags & VFIO_DEVICE_FLAGS_KEEPALIVE;
+}
+
+static void vfio_device_set_keepalive(VFIODevice *vbasedev, bool keepalive)
+{
+    if (keepalive) {
+        vbasedev->flags |= VFIO_DEVICE_FLAGS_KEEPALIVE;
+    } else {
+        vbasedev->flags &= ~VFIO_DEVICE_FLAGS_KEEPALIVE;
+    }
+}
+
+static int vfio_container_set_keepalive(VFIOContainer *container,
+                                        bool on, void *data)
+{
+    struct vfio_keepalive_data vka;
+    VFIOGroup *group;
+    VFIODevice *vbasedev;
+    int ret;
+
+    vka.keepalive = on;
+    if (on) {
+        QemuUUID *uuid = data;
+        memcpy(&vka.token, uuid, sizeof(QemuUUID));
+    } else {
+        memset(&vka.token, 0, sizeof(QemuUUID));
+    }
+    ret = ioctl(container->fd, VFIO_SET_KEEPALIVE, &vka);
+    if (ret) {
+        return ret;
+    }
+    QLIST_FOREACH(group, &container->group_list, next) {
+        QLIST_FOREACH(vbasedev, &group->device_list, next) {
+            vfio_device_set_keepalive(vbasedev, on);
+        }
+    }
+    return 0;
+}
+
+int vfio_set_keepalive(void *opaque, bool on, void *data)
+{
+    VFIOAddressSpace *space, *s;
+    VFIOContainer *container, *c;
+    VFIODevice *vbasedev, *d;
+    VFIOGroup *group, *g;
+    int ret;
+
+    QLIST_FOREACH(space, &vfio_address_spaces, list) {
+        QLIST_FOREACH(container, &space->containers, next) {
+            ret = vfio_container_set_keepalive(container, on, data);
+            if (ret) {
+                error_report("failed to set container keepalive %s",
+                    on ? "on" : "off");
+                goto revert_container_keepalive;
+            }
+        }
+    }
+
+    QLIST_FOREACH(group, &vfio_group_list, next) {
+        QLIST_FOREACH(vbasedev, &group->device_list, next) {
+            ret = vfio_migration_set_keepalive(vbasedev, on);
+            if (ret) {
+                error_report("failed to keepalive migration");
+                goto revert_migration_keepalive;
+            }
+        }
+    }
+
+    return 0;
+revert_migration_keepalive:
+    QLIST_FOREACH(d, &group->device_list, next) {
+        if (d == vbasedev) {
+            break;
+        }
+        vfio_migration_set_keepalive(d, !on);
+    }
+    QLIST_FOREACH(g, &vfio_group_list, next) {
+        if (g == group) {
+            break;
+        }
+        QLIST_FOREACH(d, &group->device_list, next) {
+            vfio_migration_set_keepalive(d, !on);
+        }
+    }
+revert_container_keepalive:
+    QLIST_FOREACH(c, &space->containers, next) {
+        if (c == container) {
+            break;
+        }
+        vfio_container_set_keepalive(c, !on, data);
+    }
+    QLIST_FOREACH(s, &vfio_address_spaces, list) {
+        if (s == space) {
+            break;
+        }
+        QLIST_FOREACH(c, &s->containers, next) {
+            vfio_container_set_keepalive(c, !on, data);
+        }
+    }
+    return ret;
 }

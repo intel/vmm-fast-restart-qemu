@@ -931,3 +931,30 @@ void vfio_migration_finalize(VFIODevice *vbasedev)
         vbasedev->migration_blocker = NULL;
     }
 }
+
+int vfio_migration_set_keepalive(VFIODevice *vbasedev, bool set)
+{
+    Error *local_err = NULL;
+    int ret = 0;
+
+    if (set && vbasedev->migration_blocker) {
+        migrate_del_blocker(vbasedev->migration_blocker);
+        error_free(vbasedev->migration_blocker);
+        vbasedev->migration_blocker = NULL;
+        return 0;
+    }
+
+    if (!set && !vbasedev->migration && !vbasedev->migration_blocker) {
+        error_setg(&vbasedev->migration_blocker,
+                   "VFIO device doesn't support migration");
+
+        ret = migrate_add_blocker(vbasedev->migration_blocker, &local_err);
+        if (local_err) {
+            error_free(vbasedev->migration_blocker);
+            error_free(local_err);
+            vbasedev->migration_blocker = NULL;
+        }
+    }
+
+    return ret;
+}

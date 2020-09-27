@@ -37,6 +37,7 @@
 #include "sysemu/kvm.h"
 #include "sysemu/runstate.h"
 #include "sysemu/sysemu.h"
+#include "exec/keepalive.h"
 #include "pci.h"
 #include "trace.h"
 #include "qapi/error.h"
@@ -47,6 +48,29 @@
 
 static void vfio_disable_interrupts(VFIOPCIDevice *vdev);
 static void vfio_mmap_set_enabled(VFIOPCIDevice *vdev, bool enabled);
+
+static int vfio_pci_check_keepalive(void *opaque)
+{
+    VFIODevice *vbasedev;
+    VFIOPCIDevice *vdev;
+    VFIOGroup *group;
+
+    QLIST_FOREACH(group, &vfio_group_list, next) {
+        QLIST_FOREACH(vbasedev, &group->device_list, next) {
+            vdev = container_of(vbasedev, VFIOPCIDevice, vbasedev);
+            if (vdev->interrupt == VFIO_INT_INTx) {
+                error_report("keepalive doesn't support INTx");
+                return -ENOTSUP;
+            }
+        }
+    }
+    return 0;
+}
+
+static KeepaliveHandler vfio_pci_keepalive_handler = {
+    .check_keepalive_support = vfio_pci_check_keepalive,
+    .set_keepalive = vfio_set_keepalive,
+};
 
 /*
  * Disabling BAR mmaping can be slow, but toggling it around INTx can
@@ -3244,6 +3268,8 @@ static void vfio_pci_dev_class_init(ObjectClass *klass, void *data)
     pdc->exit = vfio_exitfn;
     pdc->config_read = vfio_pci_read_config;
     pdc->config_write = vfio_pci_write_config;
+
+    register_keepalive_handler("vfio-pci", &vfio_pci_keepalive_handler, NULL);
 }
 
 static const TypeInfo vfio_pci_dev_info = {
